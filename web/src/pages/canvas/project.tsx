@@ -1099,6 +1099,35 @@ function CanvasViewportPage() {
         [message, replaceNodeMedia],
     );
 
+    // 剪贴板图片在图片节点的提示词面板里添加为上游参考图：新建图片节点并连到当前节点，
+    // 由调用方保留当前节点的选中状态，避免粘贴后提示词面板被新节点顶掉。
+    const handlePasteNodeReferenceImages = useCallback(
+        async (nodeId: string, files: File[]) => {
+            const images = files.filter((file) => file.type.startsWith("image/"));
+            const target = nodesRef.current.find((node) => node.id === nodeId);
+            // 只有图片/视频节点的参考图语义明确；文本、音频等节点不接管图片粘贴。
+            const acceptsImages = target?.type === CanvasNodeType.Image || target?.type === CanvasNodeType.Video;
+            if (!images.length || !target || !acceptsImages) return;
+            const createdIds: string[] = [];
+            const spec = getNodeSpec(CanvasNodeType.Image);
+            for (const [index, file] of images.entries()) {
+                // 放在目标节点左侧并向下堆叠，避免与目标节点重叠（position 是节点中心）。
+                const position = {
+                    x: target.position.x - target.width / 2 - 96 - spec.width / 2,
+                    y: target.position.y + index * (spec.height + 24),
+                };
+                const createdId = await createFileNode(file, position, undefined, { preserveSelection: true });
+                if (createdId) createdIds.push(createdId);
+            }
+            if (!createdIds.length) return;
+            const nextConnections = [...connectionsRef.current, ...createdIds.map((sourceId) => ({ id: nanoid(), fromNodeId: sourceId, toNodeId: nodeId }))];
+            connectionsRef.current = nextConnections;
+            setConnections(nextConnections);
+            message.success(createdIds.length > 1 ? `已添加 ${createdIds.length} 张参考图` : "已添加参考图");
+        },
+        [createFileNode, message, setConnections],
+    );
+
     const {
         cancelPendingConnectionCreate,
         closeConnectionCreateMenu,
@@ -2232,6 +2261,7 @@ function CanvasViewportPage() {
                     onReorderReferences={handleReorderNodeReferences}
                     onReplaceReference={handleReplaceNodeReference}
                     onReplaceReferenceFiles={handleReplaceNodeReferenceFiles}
+                    onPasteReferenceImages={handlePasteNodeReferenceImages}
                     onClose={() => setDialogNodeId(null)}
                     onNodeMouseDown={handleNodeMouseDown}
                     workspaceMode={workspaceMode}
@@ -2262,6 +2292,7 @@ function CanvasViewportPage() {
             handleConfigNodeChange,
             handleGenerateNode,
             handleNodePromptChange,
+            handlePasteNodeReferenceImages,
             handleRemoveNodeReference,
             handleReorderNodeReferences,
             handleReplaceNodeReference,

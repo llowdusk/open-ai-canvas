@@ -150,7 +150,8 @@ export function useCanvasUpload({
     }, [canvasId, domainProjectId, queryClient]);
 
     const activeUploadsRef = useRef(new Set<string>());
-    const createFileNode = useCallback(async (file: File, position: Position, replaceId?: string) => {
+    // preserveSelection 用于「粘贴为参考图」：由调用方负责连线，不能顺带改掉当前选中的节点和已打开的面板。
+    const createFileNode = useCallback(async (file: File, position: Position, replaceId?: string, options?: { preserveSelection?: boolean }) => {
         const original = replaceId ? nodesRef.current.find((node) => node.id === replaceId) : undefined;
         if (replaceId && (!original || activeUploadsRef.current.has(replaceId))) return null;
         const id = replaceId || `upload-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -162,7 +163,7 @@ export function useCanvasUpload({
                 ...item, width: placeholder.width, height: placeholder.height,
                 metadata: { ...item.metadata, fileUpload: "uploading", fileUploadProgress: undefined, status: undefined, size: undefined, errorDetails: undefined },
             } : item) : [...current, placeholder]);
-            selectInsertedNode(id, "close");
+            if (!options?.preserveSelection) selectInsertedNode(id, "close");
             let lastPercent: number | undefined;
             const onProgress = (loaded: number, total: number) => {
                 const percent = uploadPercent(loaded, total);

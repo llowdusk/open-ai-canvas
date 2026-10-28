@@ -12,6 +12,7 @@ import { InlineReferencePreview, referencePreviewUrl, syncInlineMentionPreviews 
 import { MentionMenu, clamp, mentionCaretRect } from "./canvas-mention-menu";
 import { getEditableSelection, renderEditableContent, serializeEditableValue, setEditableSelection } from "./canvas-mention-editable";
 import { mapCanvasTextOffset, mergeCanvasText } from "@/lib/canvas/canvas-text-merge";
+import { clipboardImageFiles } from "@/lib/clipboard-images";
 
 export { TOOL_ICON_MAP } from "./canvas-mention-chips";
 
@@ -51,6 +52,8 @@ type Props = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "onChange" | "val
     includeAssetLibrary?: boolean;
     activeDropReferenceId?: string | null;
     onReferenceFilesDrop?: (reference: CanvasResourceReference, files: File[]) => void;
+    /** 剪贴板里是图片时交给调用方导入，不再把图片当成文本插入。 */
+    onPasteImageFiles?: (files: File[]) => void;
     autoLinkEnabled?: boolean;
 };
 
@@ -64,7 +67,7 @@ function shouldSubmitOnEnter(event: { key: string; ctrlKey: boolean; metaKey: bo
 }
 
 export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Props>(function CanvasResourceMentionTextarea(
-    { value, references, onSelectReference, onChange, onSubmit, onKeyDown, className, containerClassName, style, highlightLabels = true, mentionMenuWidth = 320, sendOnEnter = true, onContentSizeChange, includeAssetLibrary = false, activeDropReferenceId, onReferenceFilesDrop, autoLinkEnabled = false, ...props },
+    { value, references, onSelectReference, onChange, onSubmit, onKeyDown, className, containerClassName, style, highlightLabels = true, mentionMenuWidth = 320, sendOnEnter = true, onContentSizeChange, includeAssetLibrary = false, activeDropReferenceId, onReferenceFilesDrop, onPasteImageFiles, autoLinkEnabled = false, ...props },
     forwardedRef,
 ) {
     const rawTheme = useActiveTheme();
@@ -415,8 +418,18 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                         props.onCompositionEnd?.(event as unknown as React.CompositionEvent<HTMLTextAreaElement>);
                     }}
                     onPaste={(event: ClipboardEvent<HTMLDivElement>) => {
+                        const text = event.clipboardData.getData("text/plain");
+                        // 有纯文本时按文本粘贴；只有图片（截图、复制的图片）才交给调用方导入成参考素材。
+                        if (onPasteImageFiles && !readOnly && !text.trim()) {
+                            const images = clipboardImageFiles(event.clipboardData);
+                            if (images.length) {
+                                event.preventDefault();
+                                onPasteImageFiles(images);
+                                return;
+                            }
+                        }
                         event.preventDefault();
-                        replaceEditableSelection(event.clipboardData.getData("text/plain"));
+                        replaceEditableSelection(text);
                     }}
                     onDragOver={(event: DragEvent<HTMLDivElement>) => {
                         const reference = referenceForDropTarget(event.target);

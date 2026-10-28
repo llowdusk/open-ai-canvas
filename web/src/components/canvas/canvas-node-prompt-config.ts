@@ -93,10 +93,12 @@ export function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mo
     };
 }
 
-export function promptPlaceholder(mode: CanvasNodeGenerationMode, hasImageContent: boolean, hasTextContent: boolean) {
-    if (mode === "video") return "描述要生成的视频内容";
+export function promptPlaceholder(mode: CanvasNodeGenerationMode, hasImageContent: boolean, hasTextContent: boolean, hasReferences = true) {
+    // 还没有参考图时提示可以直接粘贴；已有参考图后保持原文案，避免长期噪声。
+    const pasteHint = hasReferences ? "" : "，或粘贴参考图";
+    if (mode === "video") return `描述要生成的视频内容${pasteHint}`;
     if (mode === "audio") return "描述要生成的音频内容";
-    if (mode === "image") return hasImageContent ? "输入新提示词，重新生成当前图片" : "描述要生成的图片内容";
+    if (mode === "image") return hasImageContent ? "输入新提示词，重新生成当前图片" : `描述要生成的图片内容${pasteHint}`;
     return hasTextContent ? "请输入你想要将本段文本修改成什么" : "请输入你想要生成的文本内容";
 }
 

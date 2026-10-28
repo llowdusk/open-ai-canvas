@@ -11,6 +11,7 @@ import { SpotlightSurface } from "@/components/ui/aceternity/spotlight-surface";
 import { WorkspacePage } from "@/components/layout/workspace-page";
 import { CanvasResourceMentionTextarea } from "@/components/canvas/canvas-resource-mention-textarea";
 import { normalizeCanvasNodeMentionTokens, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { usePasteImageFiles } from "@/hooks/use-paste-image-files";
 import { imageResolutionUsesQuality } from "@/lib/image-size-presets";
 import { modelCapabilityConfigFor, normalizeImageValue, normalizeVideoValue } from "@/lib/model-capabilities";
 import { creationVideoConfig } from "@/pages/create/creation-generation-config";
@@ -558,6 +559,13 @@ export function WorkbenchPage({ kind }: { kind: WorkbenchKind }) {
         setReferences((current) => current.filter((item) => item.id !== reference.id));
     };
 
+    // 截图或复制的图片直接加入参考素材，复用「添加参考素材」的上传、类型与上限校验。
+    const addPastedImages = useCallback((files: File[]) => {
+        if (!files.length) return;
+        void addFiles(files, uploadSlotKey);
+    }, [addFiles, uploadSlotKey]);
+    usePasteImageFiles(addPastedImages, !busy);
+
     const submit = async () => {
         const revision = workbenchRevisionRef.current;
         const submittedPrompt = normalizeCanvasNodeMentionTokens(prompt.trim(), promptReferences);
@@ -1075,6 +1083,7 @@ export function WorkbenchPage({ kind }: { kind: WorkbenchKind }) {
                                         value={prompt}
                                         references={promptReferences}
                                         onChange={setPrompt}
+                                        onPasteImageFiles={addPastedImages}
                                         onSubmit={() => void submit()}
                                         sendOnEnter={false}
                                         style={{ color: "var(--wb-text)" }}
@@ -1094,8 +1103,8 @@ export function WorkbenchPage({ kind }: { kind: WorkbenchKind }) {
                                         {kind === "image" ? imageProfile?.references.maxImages || 0 : (videoProfile?.references.maxImages || 0) + (videoProfile?.references.maxVideos || 0) + (videoProfile?.references.maxAudios || 0)}
                                     </span>
                                     <div className="workbench-toolbar-actions">
-                                        <Tooltip title="添加参考素材">
-                                            <button type="button" aria-label="添加参考素材" onClick={() => fileRef.current?.click()}>
+                                        <Tooltip title="添加参考素材，也可直接粘贴图片">
+                                            <button type="button" aria-label="添加参考素材，也可直接粘贴图片" onClick={() => fileRef.current?.click()}>
                                                 <Upload />
                                             </button>
                                         </Tooltip>

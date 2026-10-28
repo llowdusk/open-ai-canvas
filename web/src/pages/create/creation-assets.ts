@@ -17,6 +17,8 @@ export type CreationDocumentAttachment = {
     previewUrl: string;
 };
 export type CreationAttachment = ((ReferenceImage | ReferenceVideo | ReferenceAudio) & { previewUrl: string }) | CreationDocumentAttachment;
+/** 上传中的占位附件：先占住轨道位置并显示进度，完成后替换为真实附件。 */
+export type CreationPendingAttachment = CreationAttachment & { pending: true; progress: number };
 import type { CreationMode } from "@/lib/creation-mode";
 
 export type { CreationMode };

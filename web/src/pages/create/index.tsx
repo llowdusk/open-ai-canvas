@@ -10,8 +10,10 @@ import { generationErrorCode, generationErrorMessage } from "@/lib/generation-er
 import { imageParameterRequest, normalizeImageParameters } from "@/lib/image-parameters";
 import { creationResultAssetIds } from "@/lib/canvas/canvas-asset-handoff";
 import { getActiveUserScope } from "@/lib/user-scope";
+import { createClientUUID } from "@/lib/client-id";
 import { continueCreationConversationOnCanvas } from "@/services/creation-canvas-conversation";
 import { useExternalAssetSources } from "@/hooks/use-external-asset-sources";
+import { usePasteImageFiles } from "@/hooks/use-paste-image-files";
 import { modelCapabilityConfigFor, normalizeImageValue, normalizeVideoValue, videoDurationAllowed, videoDurationOptions } from "@/lib/model-capabilities";
 import { inferVideoOperation, modelGroupReferenceLimits, resolveCompatibleModel, mergedImageCapabilityConfig, type ModelRequirements } from "@/lib/model-selection";
 import type { BackendGenerationResult } from "@/services/api/generation-task";
@@ -30,7 +32,7 @@ import { promptOptimizerPlugin, PROMPT_OPTIMIZER_PLUGIN_ID } from "@/lib/plugins
 import { createPluginHostContext } from "@/services/plugin-host";
 import { usePluginStore } from "@/stores/use-plugin-store";
 import { buildCreationMentionReferences, expandCreationPrompt, reconcileCreationAttachmentLimit, reconcileCreationAttachmentLimits, removeCreationReferenceTokens, replaceCreationAttachmentReference, selectedCreationReferences, type CreationReference } from "./creation-references";
-import { creationAttachmentFromAudio, creationAttachmentFromDocument, creationAttachmentFromImage, creationAttachmentFromVideo, creationAttachmentKind, creationAudioAsset, creationFileAccepted, creationImageAsset, creationMediaAspectRatio, creationUploadAccept, creationVideoAsset, removeCreationAttachment, splitCreationAttachments, type CreationAttachment } from "./creation-assets";
+import { creationAttachmentFromAudio, creationAttachmentFromDocument, creationAttachmentFromImage, creationAttachmentFromVideo, creationAttachmentKind, creationAudioAsset, creationFileAccepted, creationImageAsset, creationMediaAspectRatio, creationUploadAccept, creationVideoAsset, removeCreationAttachment, splitCreationAttachments, type CreationAttachment, type CreationPendingAttachment } from "./creation-assets";
 import { creationLibraryDisabledReason, creationLibrarySelectionToAttachments } from "./creation-library";
 import { defaultCreationMode, modeLabels, type CreationConversation, type CreationMessage, type CreationMode, type CreationRetryContext, type CreationSettings, type CreationShotRailEntry, type CreationStatus } from "./creation-types";
 import { attachCreationTaskContexts, completedCreationGenerationTask, conversationTimestamp, creationShotRail, creationVideoShotOrdinal, isImageAttachment, isVideoAttachment, materializeCreationTaskResults, newConversation, newMessage, reconcileCreationTaskMessages } from "./creation-conversations";
@@ -65,6 +67,12 @@ function writeComposerPref(key: string, value: boolean) {
     } catch {
         // 存储不可用（隐私模式/禁用）：仅当前会话生效，忽略
     }
+}
+
+/** 回收粘贴/拖入时创建的本地预览地址；非 objectURL 直接忽略。 */
+function revokeAttachmentPreview(attachment?: CreationAttachment) {
+    const url = attachment?.previewUrl;
+    if (url && url.startsWith("blob:")) URL.revokeObjectURL(url);
 }
 
 export default function CreatePage() {
@@ -441,7 +449,7 @@ export default function CreatePage() {
             })),
         ...externalLibraryItems,
     ], [assets, externalLibraryItems, mode, videoReferenceLimits]);
-    const uploadCreationAsset = async (file: File) => {
+    const uploadCreationAsset = async (file: File, onProgress?: (percent: number) => void) => {
         const { uploadImage, uploadMediaFile } = await loadCreationRuntime();
         if (file.type.startsWith("video/")) {
             const uploaded = await uploadMediaFile(file, "create-upload");
@@ -461,7 +469,7 @@ export default function CreatePage() {
             const uploaded = await uploadMediaFile(file, "create-upload");
             return { attachment: creationAttachmentFromDocument(file, uploaded) };
         }
-        const uploaded = await uploadImage(file);
+        const uploaded = await uploadImage(file, onProgress ? (loaded, total) => onProgress(total ? (loaded / total) * 100 : 0) : undefined);
         return {
             asset: creationImageAsset({ title: file.name, uploaded, metadata: { source: "create-upload", fileName: file.name } }),
             attachment: creationAttachmentFromImage(file, uploaded),
@@ -501,6 +509,7 @@ export default function CreatePage() {
 
     const removeAttachment = (id: string) => {
         const reference = mentionReferences.find((item) => item.attachmentId === id);
+        revokeAttachmentPreview(attachmentsRef.current.find((item) => item.id === id));
         setAttachments((current) => removeCreationAttachment(current, id));
         if (reference) setPrompt((current) => removeCreationReferenceTokens(current, [reference]));
     };
@@ -508,6 +517,7 @@ export default function CreatePage() {
     const clearAttachments = () => {
         const attachmentIds = new Set(attachments.map((item) => item.id));
         const references = mentionReferences.filter((item) => item.attachmentId && attachmentIds.has(item.attachmentId));
+        attachmentsRef.current.forEach(revokeAttachmentPreview);
         setAttachments([]);
         if (references.length) setPrompt((current) => removeCreationReferenceTokens(current, references));
     };
@@ -568,6 +578,55 @@ export default function CreatePage() {
             setReferenceReplacementBusy(false);
         }
     }, [addAsset, busy, referenceReplacementBusy, replaceAttachmentReference, toast]);
+
+    // 截图或复制的图片直接成为参考内容；先插入占位卡显示上传进度，完成后原位替换。
+    const addPastedImages = useCallback(async (files: File[]) => {
+        const accepted = files.filter((file) => file.type.startsWith("image/"));
+        if (!accepted.length) return;
+        // 先按当前上限裁掉多余项，避免占位卡出现后又消失。
+        const room = Math.max(0, maxReferences - attachmentsRef.current.length);
+        if (room <= 0) {
+            toast.warning(`已达到当前模型的参考内容上限（${maxReferences} 个）`);
+            return;
+        }
+        const picked = accepted.slice(0, room);
+        if (picked.length < accepted.length) toast.warning("部分素材超出当前模型的参考内容上限，未添加到创作中");
+
+        const placeholders: CreationPendingAttachment[] = picked.map((file) => ({
+            id: `paste:${createClientUUID()}`,
+            name: file.name || "剪贴板图片",
+            type: file.type || "image/png",
+            // 本地 objectUrl 立即可见，不必等上传完成。
+            previewUrl: URL.createObjectURL(file),
+            dataUrl: "",
+            url: "",
+            storageKey: "",
+            bytes: file.size,
+            width: 0,
+            height: 0,
+            pending: true,
+            progress: 0,
+        }));
+        setAttachments((current) => [...current, ...placeholders]);
+
+        await Promise.all(picked.map(async (file, index) => {
+            const placeholder = placeholders[index];
+            try {
+                const { attachment } = await uploadCreationAsset(file, (percent) => {
+                    setAttachments((current) => current.map((item) => (item.id === placeholder.id ? { ...item, progress: percent } as CreationPendingAttachment : item)));
+                });
+                // 本地 objectURL 作为预览保留：远程签名地址解码完成前先显示它，避免缩略图空窗。
+                // 不 revoke，交给移除/卸载时统一回收。
+                const ready = { ...attachment, previewUrl: placeholder.previewUrl };
+                setAttachments((current) => current.map((item) => (item.id === placeholder.id ? ready : item)));
+            } catch (error) {
+                setAttachments((current) => current.filter((item) => item.id !== placeholder.id));
+                URL.revokeObjectURL(placeholder.previewUrl);
+                toast.error(error instanceof Error ? `参考图上传失败：${error.message}` : "参考图上传失败，请重试");
+            }
+        }));
+    }, [maxReferences, toast, uploadCreationAsset]);
+    usePasteImageFiles(addPastedImages, !busy);
 
     const submit = async (retryContext?: CreationRetryContext, retryLockKey?: string) => {
         const releaseRetryLock = () => {
@@ -1022,6 +1081,7 @@ export default function CreatePage() {
         onReorderAttachments: reorderAttachments,
         onReplaceAttachment: replaceReferenceFromTrack,
         onReplaceReferenceFiles: replaceReferenceFromFiles,
+        onPasteImageFiles: addPastedImages,
         onOpenLibrary: () => setLibraryOpen(true),
         onModeChange: selectMode,
         model: selectedModel,

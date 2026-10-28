@@ -51,7 +51,9 @@ export async function uploadImage(input: string | Blob, onProgress?: (uploadedBy
     let remoteUploadError = "";
     try {
         const resource = await uploadResourceFile(blob, "image", { width: meta.width, height: meta.height, fileName: input instanceof File ? input.name : undefined, idempotencyKey: storageKey }, onProgress);
-        await primeResourceBlobCache(resourceStorageKey(resource.id), blob).catch(() => "");
+        // 字节缓存只影响后续读取速度，不阻塞上传结果返回：大图写 IndexedDB 可能耗时数秒，
+        // 粘贴参考图时会让缩略图迟迟不出现。
+        void primeResourceBlobCache(resourceStorageKey(resource.id), blob).catch(() => "");
         URL.revokeObjectURL(previewUrl);
         return {
             url: resource.publicUrl || resourceFileUrl(resource.id),

@@ -13,7 +13,7 @@ import { useEffect, useState } from "react";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { type CreationReference, displayCreationPrompt } from "./creation-references";
 import { useUserStore } from "@/stores/use-user-store";
-import { type CreationAttachment, creationAttachmentKind, creationMediaAspectRatio, type CreationMode } from "./creation-assets";
+import { type CreationAttachment, creationAttachmentKind, creationMediaAspectRatio, type CreationMode, type CreationPendingAttachment } from "./creation-assets";
 import { getResourceAccess, resolveResourceAccessURL, resolveResourceUrl, resourceIdFromStorageKey } from "@/services/api/resources";
 import { CachedResourceImage } from "@/components/cached-resource-image";
 import { Tooltip } from "@/components/ui/base/tooltip";
@@ -413,10 +413,16 @@ export function CreationMediaPreviewModal({ url, type, onClose }: { url: string;
 
 export function CreationAttachmentThumbnail({ item, onPreview, onRemove }: { item: CreationAttachment; onPreview: (type: "image" | "video", url: string) => void; onRemove: (id: string) => void }) {
     const kind = creationAttachmentKind(item);
+    // 粘贴上传中的附件：显示占位缩略图和真实进度，不提供预览/移除。
+    const pending = "pending" in item && item.pending === true ? (item as CreationPendingAttachment) : null;
+    const progress = pending ? Math.max(0, Math.min(100, Math.round(pending.progress))) : 0;
     const previewable = kind === "image" || kind === "video";
     const url = (kind === "video" ? item.url : item.previewUrl) || "";
     const imageUrl = kind === "image" ? resolveResourceUrl(item.storageKey, item.previewUrl) : "";
     const previewUrl = kind === "image" ? imageUrl : url;
+    // 上传刚完成时远程图还要取签名地址并解码；这期间继续显示本地 objectURL，
+    // 避免缩略图先退回通用文件图标再闪出图片。
+    const localPreview = kind === "image" ? item.previewUrl || "" : "";
     const content =
         kind === "video" ? (
             <video src={item.url} poster={item.previewUrl !== item.url ? item.previewUrl : undefined} muted playsInline preload="metadata" aria-label={item.name} />
@@ -427,6 +433,15 @@ export function CreationAttachmentThumbnail({ item, onPreview, onRemove }: { ite
                 alt={item.name}
                 loading="lazy"
                 decoding="async"
+                loadingFallback={
+                    localPreview ? (
+                        <img src={localPreview} alt={item.name} loading="lazy" decoding="async" />
+                    ) : (
+                        <span className="creation-chat-file-icon">
+                            <ImageIcon />
+                        </span>
+                    )
+                }
                 fallback={
                     <span className="creation-chat-file-icon">
                         <ImageIcon />
@@ -439,6 +454,19 @@ export function CreationAttachmentThumbnail({ item, onPreview, onRemove }: { ite
                 <em>{item.name}</em>
             </span>
         );
+    if (pending) {
+        return (
+            <div className="creation-reference-card-content is-pending" aria-label={`${item.name} 正在上传 ${progress}%`} aria-busy="true">
+                <div className="creation-reference-card-preview is-pending">
+                    {content}
+                    <span className="creation-reference-card-progress" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}>
+                        <span className="creation-reference-card-progress-fill" style={{ width: `${progress}%` }} />
+                    </span>
+                    <span className="creation-reference-card-progress-copy">{progress}%</span>
+                </div>
+            </div>
+        );
+    }
     return (
         <div className="creation-reference-card-content">
             {previewable ? (
