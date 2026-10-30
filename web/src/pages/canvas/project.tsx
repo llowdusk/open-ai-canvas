@@ -1107,7 +1107,12 @@ function CanvasViewportPage() {
             const target = nodesRef.current.find((node) => node.id === nodeId);
             // 只有图片/视频节点的参考图语义明确；文本、音频等节点不接管图片粘贴。
             const acceptsImages = target?.type === CanvasNodeType.Image || target?.type === CanvasNodeType.Video;
-            if (!images.length || !target || !acceptsImages) return;
+            if (!images.length || !target) return;
+            if (!acceptsImages) {
+                // 以前这里静默返回：粘到文本节点上完全没反应，只能靠猜。
+                message.info("当前节点不支持参考图，请粘贴到图片或视频节点");
+                return;
+            }
             const createdIds: string[] = [];
             const spec = getNodeSpec(CanvasNodeType.Image);
             for (const [index, file] of images.entries()) {
