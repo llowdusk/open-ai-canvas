@@ -75,6 +75,19 @@ function revokeAttachmentPreview(attachment?: CreationAttachment) {
     if (url && url.startsWith("blob:")) URL.revokeObjectURL(url);
 }
 
+/** 粘贴得到的图片来源：本地文件，或网页复制时只有地址的情况。 */
+type PasteImageSource = { kind: "file"; file: File } | { kind: "url"; url: string };
+
+function pasteSourceName(source: PasteImageSource) {
+    if (source.kind === "file") return source.file.name || "剪贴板图片";
+    try {
+        const name = decodeURIComponent(new URL(source.url).pathname.split("/").pop() || "");
+        return name || "网络图片";
+    } catch {
+        return "网络图片";
+    }
+}
+
 export default function CreatePage() {
     const [agentMode, setAgentMode] = useState(false);
     const { message: toast, modal } = App.useApp();
@@ -475,6 +488,13 @@ export default function CreatePage() {
             attachment: creationAttachmentFromImage(file, uploaded),
         };
     };
+    // 网页复制的图片常常只有地址；交给后端导入远程资源，避免浏览器 CORS 取不到字节。
+    const uploadCreationImageUrl = async (url: string, onProgress?: (percent: number) => void) => {
+        const { uploadImage } = await loadCreationRuntime();
+        const uploaded = await uploadImage(url, onProgress ? (loaded, total) => onProgress(total ? (loaded / total) * 100 : 0) : undefined);
+        const name = pasteSourceName({ kind: "url", url });
+        return creationAttachmentFromImage(new File([], name, { type: uploaded.mimeType || "image/png" }), uploaded);
+    };
     const uploadLibraryAssets = async (files: FileList | File[]) => {
         const next = Array.from(files).filter((file) => creationFileAccepted(mode, file));
         if (!next.length) return [];
@@ -579,9 +599,9 @@ export default function CreatePage() {
         }
     }, [addAsset, busy, referenceReplacementBusy, replaceAttachmentReference, toast]);
 
-    // 截图或复制的图片直接成为参考内容；先插入占位卡显示上传进度，完成后原位替换。
-    const addPastedImages = useCallback(async (files: File[]) => {
-        const accepted = files.filter((file) => file.type.startsWith("image/"));
+    // 粘贴来源：截图/复制的文件，或网页右键复制得到的图片地址（部分浏览器不给文件对象）。
+    const addPastedImages = useCallback(async (sources: PasteImageSource[]) => {
+        const accepted = sources.filter((source) => source.kind === "url" || source.file.type.startsWith("image/"));
         if (!accepted.length) return;
         // 先按当前上限裁掉多余项，避免占位卡出现后又消失。
         const room = Math.max(0, maxReferences - attachmentsRef.current.length);
@@ -592,16 +612,16 @@ export default function CreatePage() {
         const picked = accepted.slice(0, room);
         if (picked.length < accepted.length) toast.warning("部分素材超出当前模型的参考内容上限，未添加到创作中");
 
-        const placeholders: CreationPendingAttachment[] = picked.map((file) => ({
+        const placeholders: CreationPendingAttachment[] = picked.map((source) => ({
             id: `paste:${createClientUUID()}`,
-            name: file.name || "剪贴板图片",
-            type: file.type || "image/png",
-            // 本地 objectUrl 立即可见，不必等上传完成。
-            previewUrl: URL.createObjectURL(file),
+            name: pasteSourceName(source),
+            type: source.kind === "file" ? source.file.type || "image/png" : "image/png",
+            // 本地 objectUrl / 远程地址都能立即显示，不必等上传完成。
+            previewUrl: source.kind === "file" ? URL.createObjectURL(source.file) : source.url,
             dataUrl: "",
             url: "",
             storageKey: "",
-            bytes: file.size,
+            bytes: source.kind === "file" ? source.file.size : 0,
             width: 0,
             height: 0,
             pending: true,
@@ -609,24 +629,43 @@ export default function CreatePage() {
         }));
         setAttachments((current) => [...current, ...placeholders]);
 
-        await Promise.all(picked.map(async (file, index) => {
+        await Promise.all(picked.map(async (source, index) => {
             const placeholder = placeholders[index];
             try {
-                const { attachment } = await uploadCreationAsset(file, (percent) => {
+                const onProgress = (percent: number) => {
                     setAttachments((current) => current.map((item) => (item.id === placeholder.id ? { ...item, progress: percent } as CreationPendingAttachment : item)));
-                });
+                };
+                // 远程地址交给服务端导入，避免浏览器 CORS 导致取不到图。
+                const attachment = source.kind === "file"
+                    ? (await uploadCreationAsset(source.file, onProgress)).attachment
+                    : await uploadCreationImageUrl(source.url, onProgress);
                 // 本地 objectURL 作为预览保留：远程签名地址解码完成前先显示它，避免缩略图空窗。
                 // 不 revoke，交给移除/卸载时统一回收。
                 const ready = { ...attachment, previewUrl: placeholder.previewUrl };
                 setAttachments((current) => current.map((item) => (item.id === placeholder.id ? ready : item)));
             } catch (error) {
                 setAttachments((current) => current.filter((item) => item.id !== placeholder.id));
-                URL.revokeObjectURL(placeholder.previewUrl);
+                if (placeholder.previewUrl.startsWith("blob:")) URL.revokeObjectURL(placeholder.previewUrl);
                 toast.error(error instanceof Error ? `参考图上传失败：${error.message}` : "参考图上传失败，请重试");
             }
         }));
-    }, [maxReferences, toast, uploadCreationAsset]);
-    usePasteImageFiles(addPastedImages, !busy);
+    }, [maxReferences, toast, uploadCreationAsset, uploadCreationImageUrl]);
+
+    const handlePastedFiles = useCallback((files: File[]) => {
+        void addPastedImages(files.map((file) => ({ kind: "file" as const, file })));
+    }, [addPastedImages]);
+
+    const handlePastedImageUrl = useCallback((url: string) => {
+        void addPastedImages([{ kind: "url" as const, url }]);
+    }, [addPastedImages]);
+
+    // 剪贴板内容既不是图片也不是文本时给出可见反馈，不再静默丢弃。
+    const handlePasteUnhandled = useCallback((types: string[]) => {
+        const detected = types.filter(Boolean).join("、") || "未知格式";
+        toast.warning(`剪贴板里没有可用的图片（检测到：${detected}）`);
+    }, [toast]);
+
+    usePasteImageFiles(handlePastedFiles, !busy);
 
     const submit = async (retryContext?: CreationRetryContext, retryLockKey?: string) => {
         const releaseRetryLock = () => {
@@ -1081,7 +1120,9 @@ export default function CreatePage() {
         onReorderAttachments: reorderAttachments,
         onReplaceAttachment: replaceReferenceFromTrack,
         onReplaceReferenceFiles: replaceReferenceFromFiles,
-        onPasteImageFiles: addPastedImages,
+        onPasteImageFiles: handlePastedFiles,
+        onPasteImageUrl: handlePastedImageUrl,
+        onPasteUnhandled: handlePasteUnhandled,
         onOpenLibrary: () => setLibraryOpen(true),
         onModeChange: selectMode,
         model: selectedModel,

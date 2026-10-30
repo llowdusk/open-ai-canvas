@@ -12,7 +12,7 @@ import { InlineReferencePreview, referencePreviewUrl, syncInlineMentionPreviews 
 import { MentionMenu, clamp, mentionCaretRect } from "./canvas-mention-menu";
 import { getEditableSelection, renderEditableContent, serializeEditableValue, setEditableSelection } from "./canvas-mention-editable";
 import { mapCanvasTextOffset, mergeCanvasText } from "@/lib/canvas/canvas-text-merge";
-import { clipboardImageFiles } from "@/lib/clipboard-images";
+import { clipboardImageFiles, clipboardImageUrlSource } from "@/lib/clipboard-images";
 
 export { TOOL_ICON_MAP } from "./canvas-mention-chips";
 
@@ -54,6 +54,10 @@ type Props = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "onChange" | "val
     onReferenceFilesDrop?: (reference: CanvasResourceReference, files: File[]) => void;
     /** 剪贴板里是图片时交给调用方导入，不再把图片当成文本插入。 */
     onPasteImageFiles?: (files: File[]) => void;
+    /** 网页复制图片时剪贴板只有地址，没有文件对象。 */
+    onPasteImageUrl?: (url: string) => void;
+    /** 剪贴板既没有图片也没有文本时回调，用于给出可见反馈而不是静默无响应。 */
+    onPasteUnhandled?: (types: string[]) => void;
     autoLinkEnabled?: boolean;
 };
 
@@ -67,7 +71,7 @@ function shouldSubmitOnEnter(event: { key: string; ctrlKey: boolean; metaKey: bo
 }
 
 export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Props>(function CanvasResourceMentionTextarea(
-    { value, references, onSelectReference, onChange, onSubmit, onKeyDown, className, containerClassName, style, highlightLabels = true, mentionMenuWidth = 320, sendOnEnter = true, onContentSizeChange, includeAssetLibrary = false, activeDropReferenceId, onReferenceFilesDrop, onPasteImageFiles, autoLinkEnabled = false, ...props },
+    { value, references, onSelectReference, onChange, onSubmit, onKeyDown, className, containerClassName, style, highlightLabels = true, mentionMenuWidth = 320, sendOnEnter = true, onContentSizeChange, includeAssetLibrary = false, activeDropReferenceId, onReferenceFilesDrop, onPasteImageFiles, onPasteImageUrl, onPasteUnhandled, autoLinkEnabled = false, ...props },
     forwardedRef,
 ) {
     const rawTheme = useActiveTheme();
@@ -418,13 +422,30 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                         props.onCompositionEnd?.(event as unknown as React.CompositionEvent<HTMLTextAreaElement>);
                     }}
                     onPaste={(event: ClipboardEvent<HTMLDivElement>) => {
-                        const text = event.clipboardData.getData("text/plain");
-                        // 有纯文本时按文本粘贴；只有图片（截图、复制的图片）才交给调用方导入成参考素材。
-                        if (onPasteImageFiles && !readOnly && !text.trim()) {
-                            const images = clipboardImageFiles(event.clipboardData);
-                            if (images.length) {
+                        const data = event.clipboardData;
+                        const text = data.getData("text/plain");
+                        // 有纯文本时按文本粘贴；只有图片（截图、复制的图片、网页图片地址）才交给调用方导入。
+                        if (!readOnly && !text.trim()) {
+                            if (onPasteImageFiles) {
+                                const images = clipboardImageFiles(data);
+                                if (images.length) {
+                                    event.preventDefault();
+                                    onPasteImageFiles(images);
+                                    return;
+                                }
+                            }
+                            if (onPasteImageUrl) {
+                                const url = clipboardImageUrlSource(data);
+                                if (url) {
+                                    event.preventDefault();
+                                    onPasteImageUrl(url);
+                                    return;
+                                }
+                            }
+                            // 既没有图片也没有文本：交给调用方提示，避免粘贴后毫无反应。
+                            if (onPasteUnhandled && Array.from(data.types || []).length) {
                                 event.preventDefault();
-                                onPasteImageFiles(images);
+                                onPasteUnhandled(Array.from(data.types || []));
                                 return;
                             }
                         }
@@ -558,6 +579,34 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                 value={compositionValue ?? value}
                 className={`${className || ""} relative z-10`}
                 style={{ ...mergedStyle, height: "100%", minHeight: 0, maxHeight: "100%", overflowY: "auto", overflowX: "hidden" }}
+                onPaste={(event) => {
+                    // 没有参考内容时这里是普通 textarea；图片粘贴必须和富文本分支行为一致，
+                    // 否则窗口级监听会跳过 textarea，粘贴图片毫无反应。
+                    props.onPaste?.(event);
+                    if (event.defaultPrevented || readOnly) return;
+                    const clipboard = event.clipboardData;
+                    if (clipboard.getData("text/plain").trim()) return;
+                    if (onPasteImageFiles) {
+                        const images = clipboardImageFiles(clipboard);
+                        if (images.length) {
+                            event.preventDefault();
+                            onPasteImageFiles(images);
+                            return;
+                        }
+                    }
+                    if (onPasteImageUrl) {
+                        const url = clipboardImageUrlSource(clipboard);
+                        if (url) {
+                            event.preventDefault();
+                            onPasteImageUrl(url);
+                            return;
+                        }
+                    }
+                    if (onPasteUnhandled && Array.from(clipboard.types || []).length) {
+                        event.preventDefault();
+                        onPasteUnhandled(Array.from(clipboard.types || []));
+                    }
+                }}
                 onChange={(event) => {
                     if (readOnly) return;
                     const next = event.target.value;

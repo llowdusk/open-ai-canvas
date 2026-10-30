@@ -36,8 +36,9 @@ export default function UserLayout({ children }: { children: ReactNode }) {
         };
     }, [adminWorkspace, spatialWorkbench, productWorkspace]);
 
-    // 所有登录页面共用同一个面板实例：跨路由不卸载，对话、运行和事件流都不中断。
-    const globalAgent = userId ? (
+    // 画布助手只在画布编辑器中挂载：工作台、创作页和运营后台不再常驻显示形象与浮窗。
+    // 运行状态和对话都持久化在服务端，重新进入画布后按既有运行恢复，不依赖组件常驻。
+    const globalAgent = userId && canvasEditor ? (
         <Suspense fallback={null}>
             <GlobalAgentPanel key={userId} />
         </Suspense>

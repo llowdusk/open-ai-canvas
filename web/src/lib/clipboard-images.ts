@@ -44,3 +44,44 @@ export function clipboardImageFiles(data: DataTransfer | null | undefined): File
     }
     return files;
 }
+
+const IMAGE_URL_PATTERN = /^https?:\/\/[^\s]+\.(?:png|jpe?g|webp|gif|bmp|avif)(?:[?#][^\s]*)?$/i;
+
+/**
+ * 从剪贴板取出图片地址。
+ * 从网页右键复制图片时，部分浏览器只在 text/html 里给 <img src>，不提供 image/* 文件项；
+ * 这类内容交给调用方按远程图片导入，避免粘贴后毫无反应。
+ */
+export function clipboardImageUrlSource(data: DataTransfer | null | undefined): string {
+    if (!data) return "";
+    const resolve = (value: string) => {
+        const trimmed = value.trim();
+        if (!trimmed || trimmed.startsWith("data:")) return "";
+        try {
+            const url = new URL(trimmed, window.location.href);
+            return /^https?:$/.test(url.protocol) ? url.toString() : "";
+        } catch {
+            return "";
+        }
+    };
+
+    const html = data.getData("text/html");
+    if (html) {
+        const parsed = new DOMParser().parseFromString(html, "text/html");
+        for (const image of Array.from(parsed.querySelectorAll("img"))) {
+            const resolved = resolve(image.getAttribute("src") || "");
+            if (resolved) return resolved;
+        }
+    }
+    // 直接复制图片地址的情况；text/uri-list 以 # 开头的是注释行。
+    const plain = data.getData("text/uri-list") || data.getData("text/plain");
+    if (plain) {
+        for (const line of plain.split(/\r?\n/)) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith("#") || !IMAGE_URL_PATTERN.test(trimmed)) continue;
+            const resolved = resolve(trimmed);
+            if (resolved) return resolved;
+        }
+    }
+    return "";
+}
